@@ -7,6 +7,7 @@ import { IngestionService } from './ingestion.service';
 import { LogProcessor } from './log.processor';
 import { IngestionGateway } from './ingestion.gateway';
 import { LogSimulatorService } from './log.simulator.service';
+import { DemoController } from './demo.controller';
 
 @Module({
   imports: [
@@ -15,7 +16,7 @@ import { LogSimulatorService } from './log.simulator.service';
       name: 'log',
     }),
   ],
-  controllers: [IngestionController],
+  controllers: [IngestionController, DemoController],
   providers: [
     IngestionService,
     LogProcessor,

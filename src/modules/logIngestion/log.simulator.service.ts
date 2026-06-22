@@ -1,112 +1,135 @@
-import {
-  Injectable,
-  OnApplicationBootstrap,
-  OnApplicationShutdown,
-} from '@nestjs/common';
-import { IngestionService } from './ingestion.service';
-import { CreateLogDTO } from './dto/create-log.dto';
-import { InjectDataSource } from '@nestjs/typeorm';
+import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
 import { DataSource } from 'typeorm';
+import { IngestionGateway } from './ingestion.gateway';
+
+interface ServerIdQueryResult {
+  id: string;
+}
 
 @Injectable()
-export class LogSimulatorService
-  implements OnApplicationBootstrap, OnApplicationShutdown
-{
+export class LogSimulatorService implements OnModuleInit, OnModuleDestroy {
   private simulatorInterval!: NodeJS.Timeout;
-  private isSimulating = false;
 
-  // The 3 UUIDs we want to test with
-  private readonly serverIds = [
-    'a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d',
-    'b2c3d4e5-f6a7-8b9c-0d1e-2f3a4b5c6d7e',
-    'c3d4e5f6-a7b8-9c0d-1e2f-3a4b5c6d7e8f',
-  ];
+  // Auto-stop tracking variables
+  private logsGeneratedThisSession = 0;
+  private readonly MAX_LOGS_PER_SESSION = 500; // safety net, separate from the 20s TTL
+  private fallbackServerIds: string[] = [];
 
-  private readonly logLevels = [
-    'INFO',
-    'INFO',
-    'INFO',
-    'WARN',
-    'INFO',
-    'CRITICAL',
-  ];
-  private readonly errorMessages = [
-    'CPU utilization spiked to 94%',
-    'Memory consumption crossing 88% threshold',
-    'Database connection pool latency > 250ms',
-    'Disk I/O read operations throttling',
-    'Nginx microservice router heartbeat timeout',
-  ];
+  // Tracks last known active state so we only broadcast "stopped" once per transition,
+  // not on every single tick while it's already off
+  private wasActive = false;
 
-  // 🔌 Inject the DataSource so we can seed the servers table if empty
   constructor(
-    private readonly ingestionService: IngestionService,
-    @InjectDataSource() private readonly dataSource: DataSource,
+    @InjectQueue('log') private readonly logQueue: Queue,
+    private readonly dataSource: DataSource,
+    private readonly ingestionGateway: IngestionGateway,
   ) {}
 
-  async onApplicationBootstrap() {
-    await this.ensureMockServersExist();
-    this.startSimulation();
+  async onModuleInit() {
+    try {
+      const result = await this.dataSource.query<ServerIdQueryResult[]>(
+        'SELECT id FROM "servers" LIMIT 2',
+      );
+      if (result && result.length > 0) {
+        this.fallbackServerIds = result.map((row) => row.id);
+      }
+    } catch (err) {
+      console.error('Failed to pre-fetch real server IDs for simulator:', err);
+    }
+
+    this.simulatorInterval = setInterval(() => {
+      this.tickSimulator().catch((err) => console.error(err));
+    }, 100);
   }
 
-  onApplicationShutdown() {
+  onModuleDestroy() {
     if (this.simulatorInterval) {
       clearInterval(this.simulatorInterval);
     }
   }
 
-  // 🛡️ SEED FUNCTION: This inserts the mock parent records so foreign keys don't break!
-  private async ensureMockServersExist() {
-    console.log(
-      '🌱 Checking and provisioning mock cluster nodes in the database...',
-    );
-    try {
-      for (const id of this.serverIds) {
-        // Updated to remove "updatedAt" so it targets only your existing columns
-        await this.dataSource.query(`
-          INSERT INTO "servers" ("id", "name", "status", "createdAt")
-          VALUES ('${id}', 'Mock Server Node (${id.slice(0, 4)})', 'ACTIVE', NOW())
-          ON CONFLICT ("id") DO NOTHING;
-        `);
+  private async tickSimulator() {
+    const redisClient = (await this.logQueue.client) as unknown as {
+      get: (key: string) => Promise<string | null>;
+      set: (key: string, value: string) => Promise<string>;
+    };
+
+    const isDemoActive = await redisClient.get('demo-state:active');
+
+    // Off because of manual stop OR the 20s TTL expired naturally
+    if (isDemoActive !== 'true') {
+      if (this.wasActive) {
+        this.ingestionGateway.broadcastDemoStopped();
+        this.wasActive = false;
       }
-      console.log(
-        '✅ Mock cluster nodes confirmed inside the "servers" table.',
-      );
-    } catch (err) {
-      console.error('Failed to seed mock cluster nodes:', err);
+      this.logsGeneratedThisSession = 0;
+      return;
     }
-  }
 
-  private startSimulation() {
-    if (this.isSimulating) return;
-    this.isSimulating = true;
+    this.wasActive = true;
 
-    console.log(
-      '🧪 [SIMULATOR ACTIVATED] Flooding the log queue pipeline with mock cluster traffic...',
-    );
+    // Hard safety cap reached -> autostop and reset Redis key
+    if (this.logsGeneratedThisSession >= this.MAX_LOGS_PER_SESSION) {
+      console.log(
+        `[Simulator] Reached cap of ${this.MAX_LOGS_PER_SESSION} records. Triggering automatic shutdown...`,
+      );
+      await redisClient.set('demo-state:active', '');
+      this.ingestionGateway.broadcastDemoStopped();
+      this.wasActive = false;
+      this.logsGeneratedThisSession = 0;
+      return;
+    }
 
-    this.simulatorInterval = setInterval(() => {
-      const randomServer =
-        this.serverIds[Math.floor(Math.random() * this.serverIds.length)];
-      const randomLevel =
-        this.logLevels[Math.floor(Math.random() * this.logLevels.length)];
-      const randomMessage =
-        this.errorMessages[
-          Math.floor(Math.random() * this.errorMessages.length)
-        ];
+    const server1 =
+      this.fallbackServerIds[0] || '9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d';
+    const server2 =
+      this.fallbackServerIds[1] ||
+      this.fallbackServerIds[0] ||
+      '47ac10b0-58cc-4372-a567-0e02b2c3d4e5';
 
-      const mockLog: CreateLogDTO = {
-        serverId: randomServer,
-        level: randomLevel,
-        message:
-          randomLevel === 'CRITICAL'
-            ? `🔥 CRITICAL ERRROR: ${randomMessage}`
-            : randomMessage,
-      };
+    const mockPayloads = [
+      {
+        level: 'INFO',
+        serverId: server1,
+        message: 'Health check passed smoothly.',
+      },
+      {
+        level: 'INFO',
+        serverId: server2,
+        message: 'GET /api/v1/metrics status 200 OK.',
+      },
+      {
+        level: 'WARN',
+        serverId: server1,
+        message: 'Memory usage mounting above 75%.',
+      },
+      {
+        level: 'WARN',
+        serverId: server2,
+        message: 'High microservice network socket latency detected.',
+      },
+      {
+        level: 'CRITICAL',
+        serverId: server1,
+        message: 'Database connection pool exhausted! Rejecting clients.',
+      },
+      {
+        level: 'CRITICAL',
+        serverId: server2,
+        message: 'CPU Core core-0 throttling under high-load loop execution.',
+      },
+    ];
 
-      this.ingestionService.logRegister(mockLog).catch((err) => {
-        console.error('Simulator failed to register item:', err);
-      });
-    }, 100);
+    const randomRoll =
+      mockPayloads[Math.floor(Math.random() * mockPayloads.length)];
+
+    await this.logQueue.add('process-log', {
+      ...randomRoll,
+      createdAt: new Date().toISOString(),
+    });
+
+    this.logsGeneratedThisSession++;
   }
 }
