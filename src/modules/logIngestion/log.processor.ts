@@ -7,9 +7,17 @@ import { Repository } from 'typeorm';
 import { Job } from 'bullmq';
 import { IngestionGateway } from './ingestion.gateway';
 
+interface ActiveAlert {
+  message: string;
+  count: number;
+  suppressed: number;
+}
+
 @Processor('log')
 export class LogProcessor extends WorkerHost implements OnModuleDestroy {
   private logBuffer: CreateLogDTO[] = [];
+  // Tracks unique critical alert statistics for the current batch window
+  private activeAlerts: Record<string, ActiveAlert> = {};
   private readonly BATCH_SIZE = 50;
   private readonly FLUSH_INTERVAL_MS = 5000; // 5 seconds maximum wait time
   private flushTimer!: NodeJS.Timeout;
@@ -34,14 +42,14 @@ export class LogProcessor extends WorkerHost implements OnModuleDestroy {
     await this.flushBufferToDatabase(); // Final sweep of remaining items
   }
 
+  // 🌟 UPDATED: Returns a boolean indicating if the alert actually fired or was suppressed
   private async handleCriticalAlert(
     serverId: string,
     message: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const lockKey = `alert-cooldown:${serverId}`;
 
     try {
-      // Safe double-casting: route through unknown first to keep the compiler happy
       const redisClient = (await this.worker.client) as unknown as {
         set: (
           key: string,
@@ -51,11 +59,6 @@ export class LogProcessor extends WorkerHost implements OnModuleDestroy {
         ttl: (key: string) => Promise<number>;
       };
 
-      /**
-       * THE lock patteern
-       * We use an explicit options object configuration layout here instead of separate arguments.
-       * This structure is universally supported across every version of Node-Redis/IORedis definitions.
-       */
       const acquiredLock = await redisClient.set(lockKey, 'ACTIVE', {
         EX: 60,
         NX: true,
@@ -65,18 +68,20 @@ export class LogProcessor extends WorkerHost implements OnModuleDestroy {
         console.log(
           `[CRITICAL ALERT DISPATCHED] Server [${serverId}]: "${message}". Notification sent to Discord/Slack webhooks.`,
         );
+        return true; // Dispatched successfully
       } else {
-        // Fetch the remaining TTL cleanly
         const remainingTtl = await redisClient.ttl(lockKey);
         console.warn(
           `[Alert Shielded] Muting repeating critical alert for server [${serverId}]. Lock active for another ${remainingTtl}s.`,
         );
+        return false; // Muted / Suppressed
       }
     } catch (redisError) {
       console.error(
         'Failed to communicate with the rate-limiting Redis lock cache:',
         redisError,
       );
+      return false;
     }
   }
 
@@ -84,7 +89,25 @@ export class LogProcessor extends WorkerHost implements OnModuleDestroy {
     const { level, serverId, message } = job.data;
 
     if (level === 'CRITICAL') {
-      await this.handleCriticalAlert(serverId, message);
+      const isDispatched = await this.handleCriticalAlert(serverId, message);
+
+      // Extract a clean string identifier for grouping (e.g. "CPU utilization spiked to 94%")
+      const alertKey = message.replace('🔥 CRITICAL ERRROR: ', '').trim();
+
+      // Initialize the tracking state for this specific type if it's new to the window
+      if (!this.activeAlerts[alertKey]) {
+        this.activeAlerts[alertKey] = {
+          message: alertKey,
+          count: 0,
+          suppressed: 0,
+        };
+      }
+
+      // Update counters based on the Redis lock response
+      this.activeAlerts[alertKey].count += 1;
+      if (!isDispatched) {
+        this.activeAlerts[alertKey].suppressed += 1;
+      }
     }
 
     // The log still flows safely down to Postgres so you have complete records!
@@ -98,18 +121,22 @@ export class LogProcessor extends WorkerHost implements OnModuleDestroy {
   private async flushBufferToDatabase(): Promise<void> {
     if (this.logBuffer.length === 0) return;
 
-    // Snapshot current state and clear array instantly to avoid concurrency race conditions
+    // Snapshot current states and clear properties instantly to prevent concurrency mutations
     const itemsToInsert = [...this.logBuffer];
+    const alertsToBroadcast = Object.values(this.activeAlerts); // 🌟 FIX: Convert our dictionary values into a clean array!
+
     this.logBuffer = [];
+    this.activeAlerts = {}; // Reset the map for the next 5-second interval
 
     try {
-      // 🌟 FIX: Use the managed repository save() method for reliable multi-row insertion
       await this.logRepository.save(itemsToInsert);
 
       console.log(
         `[BullMQ Batch] Successfully flushed ${itemsToInsert.length} log records to PostgreSQL.`,
       );
-      this.ingestionGateway.broadcastMetrics(itemsToInsert);
+
+      // 🌟 FIX: Send the clean array matching the gateway signature perfectly
+      this.ingestionGateway.broadcastMetrics(itemsToInsert, alertsToBroadcast);
     } catch (error) {
       console.error(
         'Critical failure writing bulk log records down to TypeORM:',

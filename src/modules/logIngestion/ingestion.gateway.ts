@@ -10,7 +10,10 @@ export class IngestionGateway {
   @WebSocketServer()
   server!: Server;
 
-  broadcastMetrics(data: any[]) {
-    this.server.emit('metrics-update', data);
+  broadcastMetrics(batchLogs: any[], criticalAlerts: any[] = []) {
+    this.server.emit('metrics-update', {
+      logs: batchLogs,
+      alerts: criticalAlerts,
+    });
   }
 }
