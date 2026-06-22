@@ -32,10 +32,27 @@ import { IngestionModule } from './modules/logIngestion/ingestion.module';
         };
       },
     }),
-    BullModule.forRoot({
-      connection: {
-        host: 'localhost',
-        port: 6379,
+    BullModule.forRootAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => {
+        const redisUrl = config.get<string>('REDIS_URL');
+
+        if (redisUrl) {
+          const url = new URL(redisUrl);
+          return {
+            connection: {
+              host: url.hostname,
+              port: Number(url.port),
+              password: url.password || undefined,
+              username: url.username || undefined,
+              tls: url.protocol === 'rediss:' ? {} : undefined, // Upstash uses rediss://
+            },
+          };
+        }
+
+        // local dev fallback
+        return { connection: { host: 'localhost', port: 6379 } };
       },
     }),
     AuthModule,

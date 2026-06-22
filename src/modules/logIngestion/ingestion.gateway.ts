@@ -5,7 +5,12 @@ import {
 } from '@nestjs/websockets';
 import { Server } from 'socket.io';
 
-@WebSocketGateway({ cors: { origin: '*' } })
+@WebSocketGateway({
+  cors: {
+    origin: ['http://localhost:3000', 'https://mapwise-one.vercel.app'],
+    credentials: true,
+  },
+})
 export class IngestionGateway {
   @WebSocketServer() server!: Server;
 
