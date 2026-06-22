@@ -8,18 +8,22 @@ interface ServerIdQueryResult {
   id: string;
 }
 
+// Define the shape of the Redis client to fix ESLint 'any' errors
+interface RedisClient {
+  get(key: string): Promise<string | null>;
+  set(key: string, value: string): Promise<string>;
+}
+
 @Injectable()
 export class LogSimulatorService implements OnModuleInit, OnModuleDestroy {
   private simulatorInterval!: NodeJS.Timeout;
-
-  // Auto-stop tracking variables
   private logsGeneratedThisSession = 0;
-  private readonly MAX_LOGS_PER_SESSION = 500; // safety net, separate from the 20s TTL
+  private readonly MAX_LOGS_PER_SESSION = 500;
   private fallbackServerIds: string[] = [];
-
-  // Tracks last known active state so we only broadcast "stopped" once per transition,
-  // not on every single tick while it's already off
   private wasActive = false;
+
+  private readonly DEMO_SERVER_1 = '9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d';
+  private readonly DEMO_SERVER_2 = '47ac10b0-58cc-4372-a567-0e02b2c3d4e5';
 
   constructor(
     @InjectQueue('log') private readonly logQueue: Queue,
@@ -29,18 +33,36 @@ export class LogSimulatorService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleInit() {
     try {
+      // 1. Check for existing servers
       const result = await this.dataSource.query<ServerIdQueryResult[]>(
         'SELECT id FROM "servers" LIMIT 2',
       );
+
       if (result && result.length > 0) {
         this.fallbackServerIds = result.map((row) => row.id);
+      } else {
+        // 2. Seed demo servers if none exist
+        await this.dataSource.query(
+          `INSERT INTO "servers" (id, name, status)
+           VALUES ($1, 'Demo Server 1', 'ONLINE'), ($2, 'Demo Server 2', 'ONLINE')
+           ON CONFLICT (id) DO NOTHING`,
+          [this.DEMO_SERVER_1, this.DEMO_SERVER_2],
+        );
+        this.fallbackServerIds = [this.DEMO_SERVER_1, this.DEMO_SERVER_2];
+        console.log('[Simulator] Seeded demo servers successfully.');
       }
     } catch (err) {
-      console.error('Failed to pre-fetch real server IDs for simulator:', err);
+      console.error(
+        '[Simulator] Failed to pre-fetch or seed demo server IDs:',
+        err,
+      );
     }
 
+    // 3. Start the loop
     this.simulatorInterval = setInterval(() => {
-      this.tickSimulator().catch((err) => console.error(err));
+      this.tickSimulator().catch((err) =>
+        console.error('[Simulator Error]', err),
+      );
     }, 100);
   }
 
@@ -51,14 +73,10 @@ export class LogSimulatorService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async tickSimulator() {
-    const redisClient = (await this.logQueue.client) as unknown as {
-      get: (key: string) => Promise<string | null>;
-      set: (key: string, value: string) => Promise<string>;
-    };
-
+    // Correctly typed Redis client
+    const redisClient = (await this.logQueue.client) as unknown as RedisClient;
     const isDemoActive = await redisClient.get('demo-state:active');
 
-    // Off because of manual stop OR the 20s TTL expired naturally
     if (isDemoActive !== 'true') {
       if (this.wasActive) {
         this.ingestionGateway.broadcastDemoStopped();
@@ -70,11 +88,8 @@ export class LogSimulatorService implements OnModuleInit, OnModuleDestroy {
 
     this.wasActive = true;
 
-    // Hard safety cap reached -> autostop and reset Redis key
     if (this.logsGeneratedThisSession >= this.MAX_LOGS_PER_SESSION) {
-      console.log(
-        `[Simulator] Reached cap of ${this.MAX_LOGS_PER_SESSION} records. Triggering automatic shutdown...`,
-      );
+      console.log('[Simulator] Session cap reached. Shutting down.');
       await redisClient.set('demo-state:active', '');
       this.ingestionGateway.broadcastDemoStopped();
       this.wasActive = false;
@@ -82,12 +97,11 @@ export class LogSimulatorService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const server1 =
-      this.fallbackServerIds[0] || '9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d';
+    const server1 = this.fallbackServerIds[0] || this.DEMO_SERVER_1;
     const server2 =
       this.fallbackServerIds[1] ||
       this.fallbackServerIds[0] ||
-      '47ac10b0-58cc-4372-a567-0e02b2c3d4e5';
+      this.DEMO_SERVER_2;
 
     const mockPayloads = [
       {
@@ -113,12 +127,12 @@ export class LogSimulatorService implements OnModuleInit, OnModuleDestroy {
       {
         level: 'CRITICAL',
         serverId: server1,
-        message: 'Database connection pool exhausted! Rejecting clients.',
+        message: 'Database connection pool exhausted!',
       },
       {
         level: 'CRITICAL',
         serverId: server2,
-        message: 'CPU Core core-0 throttling under high-load loop execution.',
+        message: 'CPU Core throttling detected.',
       },
     ];
 
