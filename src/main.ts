@@ -13,7 +13,10 @@ async function bootstrap() {
     }),
   );
   app.enableCors({
-    origin: ['http://localhost:3000', 'https://mapwise-one.vercel.app'],
+    origin: [
+      'http://localhost:3000',
+      'https://real-time-dashboard-seven.vercel.app',
+    ],
     credentials: true,
   });
   app.use(cookieParser());

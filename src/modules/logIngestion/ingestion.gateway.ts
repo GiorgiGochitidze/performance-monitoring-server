@@ -7,7 +7,10 @@ import { Server } from 'socket.io';
 
 @WebSocketGateway({
   cors: {
-    origin: ['http://localhost:3000', 'https://mapwise-one.vercel.app'],
+    origin: [
+      'http://localhost:3000',
+      'https://real-time-dashboard-seven.vercel.app',
+    ],
     credentials: true,
   },
 })
