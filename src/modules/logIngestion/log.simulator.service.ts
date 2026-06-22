@@ -16,7 +16,7 @@ interface RedisClient {
 
 @Injectable()
 export class LogSimulatorService implements OnModuleInit, OnModuleDestroy {
-  private simulatorInterval!: NodeJS.Timeout;
+  private simulatorInterval: NodeJS.Timeout | null = null;
   private logsGeneratedThisSession = 0;
   private readonly MAX_LOGS_PER_SESSION = 500;
   private fallbackServerIds: string[] = [];
@@ -30,6 +30,21 @@ export class LogSimulatorService implements OnModuleInit, OnModuleDestroy {
     private readonly dataSource: DataSource,
     private readonly ingestionGateway: IngestionGateway,
   ) {}
+
+  public startSimulation() {
+    if (this.simulatorInterval) return; // Prevent multiple intervals
+
+    this.simulatorInterval = setInterval(() => {
+      this.tickSimulator().catch(console.error);
+    }, 100);
+  }
+
+  public stopSimulation() {
+    if (this.simulatorInterval) {
+      clearInterval(this.simulatorInterval);
+      this.simulatorInterval = null;
+    }
+  }
 
   async onModuleInit() {
     try {
@@ -57,13 +72,6 @@ export class LogSimulatorService implements OnModuleInit, OnModuleDestroy {
         err,
       );
     }
-
-    // 3. Start the loop
-    this.simulatorInterval = setInterval(() => {
-      this.tickSimulator().catch((err) =>
-        console.error('[Simulator Error]', err),
-      );
-    }, 100);
   }
 
   onModuleDestroy() {

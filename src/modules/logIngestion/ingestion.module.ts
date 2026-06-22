@@ -14,6 +14,10 @@ import { DemoController } from './demo.controller';
     TypeOrmModule.forFeature([Log]),
     BullModule.registerQueue({
       name: 'log',
+      defaultJobOptions: {
+        removeOnComplete: 100, // Keep only the last 100 jobs, delete the rest
+        removeOnFail: 100, // Keep only the last 100 failed jobs
+      },
     }),
   ],
   controllers: [IngestionController, DemoController],
