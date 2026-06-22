@@ -6,7 +6,7 @@ import { IngestionController } from './ingestion.controller';
 import { IngestionService } from './ingestion.service';
 import { LogProcessor } from './log.processor';
 import { IngestionGateway } from './ingestion.gateway';
-// import { LogSimulatorService } from './log.simulator.service';
+import { LogSimulatorService } from './log.simulator.service';
 
 @Module({
   imports: [
@@ -21,7 +21,7 @@ import { IngestionGateway } from './ingestion.gateway';
     LogProcessor,
     IngestionGateway,
     // Uncomment only in dev and when you want to simulate flow, otherwise db will get filled with mock data
-    // LogSimulatorService,
+    LogSimulatorService,
   ],
 })
 export class IngestionModule {}

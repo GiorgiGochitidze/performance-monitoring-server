@@ -107,6 +107,6 @@ export class LogSimulatorService
       this.ingestionService.logRegister(mockLog).catch((err) => {
         console.error('Simulator failed to register item:', err);
       });
-    }, 300);
+    }, 100);
   }
 }

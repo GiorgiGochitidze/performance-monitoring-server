@@ -19,7 +19,7 @@ export class LogProcessor extends WorkerHost implements OnModuleDestroy {
   // Tracks unique critical alert statistics for the current batch window
   private activeAlerts: Record<string, ActiveAlert> = {};
   private readonly BATCH_SIZE = 50;
-  private readonly FLUSH_INTERVAL_MS = 5000; // 5 seconds maximum wait time
+  private readonly FLUSH_INTERVAL_MS = 1000; // 5 seconds maximum wait time
   private flushTimer!: NodeJS.Timeout;
 
   constructor(
