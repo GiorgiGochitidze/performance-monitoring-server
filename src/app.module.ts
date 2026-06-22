@@ -2,8 +2,10 @@ import { Module } from '@nestjs/common';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { MongooseModule } from '@nestjs/mongoose';
 import { AuthModule } from './modules/auth/auth.module';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { BullModule } from '@nestjs/bullmq';
+import { IngestionModule } from './modules/logIngestion/ingestion.module';
 
 @Module({
   imports: [
@@ -11,14 +13,33 @@ import { AuthModule } from './modules/auth/auth.module';
       isGlobal: true,
       envFilePath: '.env',
     }),
-    MongooseModule.forRootAsync({
+    TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
-      useFactory: (configService: ConfigService) => ({
-        uri: configService.get<string>('MONGODB_URI'),
-      }),
       inject: [ConfigService],
+      useFactory: (configService: ConfigService) => {
+        const dbUrl = configService.get<string>('DATABASE_URL') || '';
+        // Automatically detect if we are connecting to Neon or Localhost
+        const isNeon = dbUrl.includes('neon.tech');
+
+        return {
+          type: 'postgres',
+          url: dbUrl,
+          entities: [__dirname + '/**/*.entity.{js,ts}'],
+          autoLoadEntities: true,
+          synchronize: process.env.NODE_ENV !== 'production',
+          ssl: isNeon ? { rejectUnauthorized: false } : false,
+          extra: isNeon ? { sslmode: 'verify-full' } : {},
+        };
+      },
+    }),
+    BullModule.forRoot({
+      connection: {
+        host: 'localhost',
+        port: 6379,
+      },
     }),
     AuthModule,
+    IngestionModule,
   ],
   controllers: [AppController],
   providers: [AppService],

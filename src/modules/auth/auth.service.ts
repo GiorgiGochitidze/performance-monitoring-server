@@ -6,19 +6,30 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { CreateAuthDto } from './dto/create-auth.dto';
-import { InjectModel } from '@nestjs/mongoose';
-import { User, UserDocument } from './schema/UserAuth.schema';
-import { Model } from 'mongoose';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 import { JwtService } from '@nestjs/jwt';
 import { Response as ExpressResponse } from 'express';
+import { User } from './entities/UserAuth.entity';
+
+interface TokenPayload {
+  id: string;
+  email: string;
+}
 
 @Injectable()
 export class AuthService {
   constructor(
-    @InjectModel(User.name) private userModel: Model<UserDocument>,
-    private jwtService: JwtService,
+    @InjectRepository(User)
+    private readonly userRepository: Repository<User>,
+    private readonly jwtService: JwtService,
   ) {}
+
+  private getErrorMessage(error: unknown): string {
+    if (error instanceof Error) return error.message;
+    return String(error);
+  }
 
   async signUp(
     createAuthDto: CreateAuthDto,
@@ -27,29 +38,26 @@ export class AuthService {
     const { email, password } = createAuthDto;
 
     try {
-      const existingUser = await this.userModel.findOne({ email });
+      const existingUser = await this.userRepository.findOneBy({ email });
       if (existingUser) {
         throw new ConflictException('User with this email already exists');
       }
 
       const hashedPassword = await bcrypt.hash(password, 10);
 
-      const newUser = (await this.userModel.create({
+      const newUser = this.userRepository.create({
         email,
         password: hashedPassword,
-      })) as UserDocument;
+      });
+      await this.userRepository.save(newUser);
 
-      await this.setTokenCookies(res, newUser);
+      await this.setTokenCookies(res, { id: newUser.id, email: newUser.email });
 
       return { message: 'Successfully Signed Up' };
     } catch (error: unknown) {
-      if (error instanceof Error && 'status' in error) {
-        throw error;
-      }
+      if (error instanceof Error && 'status' in error) throw error;
       throw new InternalServerErrorException(
-        error instanceof Error
-          ? error.message
-          : 'Unexpected error during registration',
+        this.getErrorMessage(error) || 'Unexpected error during registration',
       );
     }
   }
@@ -61,7 +69,7 @@ export class AuthService {
     const { email, password } = createAuthDto;
 
     try {
-      const user = await this.userModel.findOne({ email });
+      const user = await this.userRepository.findOneBy({ email });
       if (!user) {
         throw new UnauthorizedException('Invalid credentials');
       }
@@ -71,15 +79,13 @@ export class AuthService {
         throw new UnauthorizedException('Invalid credentials');
       }
 
-      await this.setTokenCookies(res, user);
+      await this.setTokenCookies(res, { id: user.id, email: user.email });
 
       return { message: 'Successfully Signed In' };
     } catch (error: unknown) {
       if (error instanceof Error && 'status' in error) throw error;
       throw new InternalServerErrorException(
-        error instanceof Error
-          ? error.message
-          : 'Unexpected error during login',
+        this.getErrorMessage(error) || 'Unexpected error during login',
       );
     }
   }
@@ -90,7 +96,7 @@ export class AuthService {
     res: ExpressResponse,
   ): Promise<{ message: string }> {
     try {
-      const user = await this.userModel.findById(userId);
+      const user = await this.userRepository.findOneBy({ id: userId });
       if (!user || !user.refreshToken) {
         throw new UnauthorizedException('Access Denied: Session closed');
       }
@@ -100,12 +106,11 @@ export class AuthService {
         user.refreshToken,
       );
       if (!isTokenValid) {
-        user.refreshToken = null;
-        await user.save();
+        await this.userRepository.update(userId, { refreshToken: null });
         throw new ForbiddenException('Compromised session detected');
       }
 
-      await this.setTokenCookies(res, user);
+      await this.setTokenCookies(res, { id: user.id, email: user.email });
 
       return { message: 'Tokens rotated successfully' };
     } catch (error: unknown) {
@@ -116,9 +121,9 @@ export class AuthService {
 
   private async setTokenCookies(
     res: ExpressResponse,
-    user: UserDocument,
+    user: TokenPayload,
   ): Promise<void> {
-    const payload = { id: user._id, email: user.email };
+    const payload = { id: user.id, email: user.email };
 
     const [accessToken, refreshToken] = await Promise.all([
       this.jwtService.signAsync(payload, {
@@ -133,8 +138,7 @@ export class AuthService {
 
     const hashedToken = await bcrypt.hash(refreshToken, 10);
 
-    user.refreshToken = hashedToken;
-    await user.save();
+    await this.userRepository.update(user.id, { refreshToken: hashedToken });
 
     const isProd = process.env.NODE_ENV === 'production';
 
